@@ -152,18 +152,47 @@ public sealed class SettingsForm : Form
 
     /// <summary>
     /// Imports several zips one at a time, showing the usual role-mapping confirmation for each
-    /// so a bad auto-detection on one pack doesn't silently taint a bulk import.
+    /// so a bad auto-detection on one pack doesn't silently taint a bulk import. After each
+    /// successful import, asks whether to delete the source zip; when importing more than one,
+    /// the user can apply that choice to the rest instead of being asked every time.
     /// </summary>
     private void ImportZipsSequentially(IReadOnlyList<string> zipPaths)
     {
         var importedCount = 0;
+        bool? rememberedDeleteChoice = null;
+
         foreach (var zipPath in zipPaths)
         {
             var before = _settings.Packs.Count;
             ImportAndConfirmPack(() => CursorPackImporter.Extract(zipPath), $"ZIPの展開に失敗しました。\n({Path.GetFileName(zipPath)})");
-            if (_settings.Packs.Count > before)
+            if (_settings.Packs.Count <= before)
             {
-                importedCount++;
+                continue; // user cancelled the role mapping for this one; nothing to clean up
+            }
+            importedCount++;
+
+            bool shouldDelete;
+            if (rememberedDeleteChoice.HasValue)
+            {
+                shouldDelete = rememberedDeleteChoice.Value;
+            }
+            else
+            {
+                var (delete, applyToRest) = AskDeleteZip(this, Path.GetFileName(zipPath), zipPaths.Count > 1);
+                shouldDelete = delete;
+                if (applyToRest)
+                {
+                    rememberedDeleteChoice = delete;
+                }
+            }
+
+            if (shouldDelete)
+            {
+                try { File.Delete(zipPath); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, $"ZIPファイルの削除に失敗しました。\n{ex.Message}", "確認", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
             }
         }
 
@@ -172,6 +201,54 @@ public sealed class SettingsForm : Form
             MessageBox.Show(this, $"{zipPaths.Count}個中{importedCount}個のデザインを登録しました。", "一括インポート完了",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
+    }
+
+    /// <summary>Asks whether to delete an imported zip. When <paramref name="showApplyToRest"/> is
+    /// true, offers a checkbox to apply the same answer to the rest of the batch.</summary>
+    private static (bool Delete, bool ApplyToRest) AskDeleteZip(IWin32Window owner, string zipFileName, bool showApplyToRest)
+    {
+        using var dialog = new Form
+        {
+            Text = "ZIPファイルの削除",
+            Width = 440,
+            Height = showApplyToRest ? 190 : 160,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false,
+            MaximizeBox = false,
+        };
+
+        var label = new Label
+        {
+            Text = $"「{zipFileName}」を削除しますか?\nカーソルファイルは既に読み込み済みのため、ZIP自体は不要です。",
+            AutoSize = false,
+            Left = 12,
+            Top = 12,
+            Width = 400,
+            Height = 50,
+        };
+        dialog.Controls.Add(label);
+
+        var applyToRestBox = new CheckBox
+        {
+            Text = "残りのZIPファイルにもこの選択を適用する",
+            AutoSize = true,
+            Left = 12,
+            Top = 66,
+            Visible = showApplyToRest,
+        };
+        dialog.Controls.Add(applyToRestBox);
+
+        var buttonTop = showApplyToRest ? 100 : 70;
+        var deleteButton = new Button { Text = "削除する", DialogResult = DialogResult.Yes, Left = 150, Top = buttonTop, Width = 100 };
+        var keepButton = new Button { Text = "削除しない", DialogResult = DialogResult.No, Left = 260, Top = buttonTop, Width = 100 };
+        dialog.Controls.Add(deleteButton);
+        dialog.Controls.Add(keepButton);
+        dialog.AcceptButton = keepButton;
+        dialog.CancelButton = keepButton;
+
+        var result = dialog.ShowDialog(owner);
+        return (result == DialogResult.Yes, applyToRestBox.Checked);
     }
 
     private void OnAddPackFromFolderClicked(object? sender, EventArgs e)
