@@ -159,15 +159,20 @@ public sealed class SettingsForm : Form
     private void ImportZipsSequentially(IReadOnlyList<string> zipPaths)
     {
         var importedCount = 0;
+        var allowAbort = zipPaths.Count > 1;
         bool? rememberedDeleteChoice = null;
 
         foreach (var zipPath in zipPaths)
         {
             var before = _settings.Packs.Count;
-            ImportAndConfirmPack(() => CursorPackImporter.Extract(zipPath), $"ZIPの展開に失敗しました。\n({Path.GetFileName(zipPath)})");
+            var aborted = ImportAndConfirmPack(() => CursorPackImporter.Extract(zipPath), $"ZIPの展開に失敗しました。\n({Path.GetFileName(zipPath)})", allowAbort);
+            if (aborted)
+            {
+                break;
+            }
             if (_settings.Packs.Count <= before)
             {
-                continue; // user cancelled the role mapping for this one; nothing to clean up
+                continue; // user skipped this one; nothing to clean up
             }
             importedCount++;
 
@@ -291,8 +296,9 @@ public sealed class SettingsForm : Form
     /// <summary>
     /// Shared tail end of every "add pack" flow (ZIP/folder/files): run the importer, let the
     /// user review/fix the auto-detected role mapping, then register the resulting pack.
+    /// Returns true if the user asked to abort the rest of a batch import.
     /// </summary>
-    private void ImportAndConfirmPack(Func<CursorPackImporter.ImportResult> import, string failureMessage)
+    private bool ImportAndConfirmPack(Func<CursorPackImporter.ImportResult> import, string failureMessage, bool allowAbortBatch = false)
     {
         CursorPackImporter.ImportResult imported;
         try
@@ -302,16 +308,16 @@ public sealed class SettingsForm : Form
         catch (Exception ex)
         {
             MessageBox.Show(this, $"{failureMessage}\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
+            return false;
         }
 
         var existingNames = _settings.Packs.Select(p => p.Name).ToHashSet();
-        using var mappingForm = new RoleMappingForm(imported.PackName, imported.FolderPath, imported.Detection, existingNames);
+        using var mappingForm = new RoleMappingForm(imported.PackName, imported.FolderPath, imported.Detection, existingNames, allowAbortBatch);
         if (mappingForm.ShowDialog(this) != DialogResult.OK)
         {
-            // User cancelled: remove the copied/extracted files so we don't leave orphaned folders.
+            // User skipped/aborted: remove the copied/extracted files so we don't leave orphaned folders.
             try { Directory.Delete(imported.FolderPath, recursive: true); } catch { /* best effort cleanup */ }
-            return;
+            return mappingForm.AbortBatch;
         }
 
         var pack = new CursorPack
@@ -326,6 +332,7 @@ public sealed class SettingsForm : Form
         _settings.Packs.Add(pack);
         _saveSettings();
         RefreshPackList();
+        return false;
     }
 
     private static string MakeUniqueSchemeName(string baseName)

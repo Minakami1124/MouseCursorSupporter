@@ -20,7 +20,11 @@ public sealed class RoleMappingForm : Form
     public string ResultPackName { get; private set; } = "";
     public Dictionary<CursorRole, string> ResultRoleFiles { get; } = new();
 
-    public RoleMappingForm(string suggestedName, string folderPath, RoleDetector.DetectionResult detection, HashSet<string> existingNames)
+    /// <summary>True when the user clicked "一括インポートを中止" instead of Cancel/OK.</summary>
+    public bool AbortBatch { get; private set; }
+
+    public RoleMappingForm(string suggestedName, string folderPath, RoleDetector.DetectionResult detection,
+        HashSet<string> existingNames, bool allowAbortBatch = false)
     {
         _existingNames = existingNames;
 
@@ -122,9 +126,27 @@ public sealed class RoleMappingForm : Form
         var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, AutoSize = true };
         var okButton = new Button { Text = "この内容で登録", AutoSize = true };
         okButton.Click += OnOkClicked;
-        var cancelButton = new Button { Text = "キャンセル", AutoSize = true, DialogResult = DialogResult.Cancel };
+        var cancelButton = new Button
+        {
+            Text = allowAbortBatch ? "このパックをスキップ" : "キャンセル",
+            AutoSize = true,
+            DialogResult = DialogResult.Cancel,
+        };
         buttonPanel.Controls.Add(okButton);
         buttonPanel.Controls.Add(cancelButton);
+
+        if (allowAbortBatch)
+        {
+            var abortButton = new Button { Text = "一括インポートを中止", AutoSize = true };
+            abortButton.Click += (_, _) =>
+            {
+                AbortBatch = true;
+                DialogResult = DialogResult.Cancel;
+                Close();
+            };
+            buttonPanel.Controls.Add(abortButton);
+        }
+
         root.Controls.Add(buttonPanel, 0, 2);
 
         Controls.Add(root);
