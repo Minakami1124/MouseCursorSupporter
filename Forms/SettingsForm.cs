@@ -74,6 +74,10 @@ public sealed class SettingsForm : Form
         addFolderButton.Click += OnAddPackFromFolderClicked;
         var addFilesButton = new Button { Text = "ファイルから追加...", AutoSize = true };
         addFilesButton.Click += OnAddPackFromFilesClicked;
+        var addZipFolderButton = new Button { Text = "フォルダ内ZIPを一括インポート...", AutoSize = true };
+        addZipFolderButton.Click += OnAddPacksFromZipFolderClicked;
+        var editButton = new Button { Text = "内容を編集...", AutoSize = true };
+        editButton.Click += OnEditPackClicked;
         var renameButton = new Button { Text = "名前を変更", AutoSize = true };
         renameButton.Click += OnRenamePackClicked;
         var removeButton = new Button { Text = "削除", AutoSize = true };
@@ -81,6 +85,8 @@ public sealed class SettingsForm : Form
         buttons.Controls.Add(addZipButton);
         buttons.Controls.Add(addFolderButton);
         buttons.Controls.Add(addFilesButton);
+        buttons.Controls.Add(addZipFolderButton);
+        buttons.Controls.Add(editButton);
         buttons.Controls.Add(renameButton);
         buttons.Controls.Add(removeButton);
         layout.Controls.Add(buttons, 0, 1);
@@ -110,15 +116,62 @@ public sealed class SettingsForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Title = "マウスカーソルのZIPファイルを選択",
+            Title = "マウスカーソルのZIPファイルを選択(複数選択可)",
             Filter = "ZIPファイル (*.zip)|*.zip",
+            Multiselect = true,
         };
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
             return;
         }
 
-        ImportAndConfirmPack(() => CursorPackImporter.Extract(dialog.FileName), "ZIPの展開に失敗しました。");
+        ImportZipsSequentially(dialog.FileNames);
+    }
+
+    private void OnAddPacksFromZipFolderClicked(object? sender, EventArgs e)
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "ZIPファイルが入ったフォルダを選択してください(そのフォルダ直下のZIPをまとめて読み込みます)",
+            UseDescriptionForTitle = true,
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        var zipPaths = Directory.GetFiles(dialog.SelectedPath, "*.zip");
+        if (zipPaths.Length == 0)
+        {
+            MessageBox.Show(this, "選択したフォルダにZIPファイルが見つかりませんでした。", "確認", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        ImportZipsSequentially(zipPaths);
+    }
+
+    /// <summary>
+    /// Imports several zips one at a time, showing the usual role-mapping confirmation for each
+    /// so a bad auto-detection on one pack doesn't silently taint a bulk import.
+    /// </summary>
+    private void ImportZipsSequentially(IReadOnlyList<string> zipPaths)
+    {
+        var importedCount = 0;
+        foreach (var zipPath in zipPaths)
+        {
+            var before = _settings.Packs.Count;
+            ImportAndConfirmPack(() => CursorPackImporter.Extract(zipPath), $"ZIPの展開に失敗しました。\n({Path.GetFileName(zipPath)})");
+            if (_settings.Packs.Count > before)
+            {
+                importedCount++;
+            }
+        }
+
+        if (zipPaths.Count > 1)
+        {
+            MessageBox.Show(this, $"{zipPaths.Count}個中{importedCount}個のデザインを登録しました。", "一括インポート完了",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
     }
 
     private void OnAddPackFromFolderClicked(object? sender, EventArgs e)
@@ -209,6 +262,51 @@ public sealed class SettingsForm : Form
             candidate = $"{baseName} ({i++})";
         }
         return candidate;
+    }
+
+    private void OnEditPackClicked(object? sender, EventArgs e)
+    {
+        if (_packListBox.SelectedItem is not CursorPack pack)
+        {
+            return;
+        }
+
+        var allFiles = Directory.EnumerateFiles(pack.FolderPath, "*", SearchOption.AllDirectories)
+            .Where(f => f.EndsWith(".cur", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".ani", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        // Re-run detection so any newer/better keyword matches show up as suggestions, but let
+        // the pack's own saved assignments win where they exist - editing shouldn't silently
+        // discard a mapping the user already fixed by hand.
+        var detection = RoleDetector.DetectAll(allFiles);
+        foreach (var (role, path) in pack.RoleFiles)
+        {
+            detection.Assigned[role] = path;
+        }
+
+        var existingNames = _settings.Packs.Where(p => p.Id != pack.Id).Select(p => p.Name).ToHashSet();
+        using var mappingForm = new RoleMappingForm(pack.Name, pack.FolderPath, detection, existingNames);
+        if (mappingForm.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        if (mappingForm.ResultPackName != pack.Name)
+        {
+            CursorRegistryService.RemoveScheme(pack.SchemeName);
+            pack.Name = mappingForm.ResultPackName;
+            pack.SchemeName = MakeUniqueSchemeName(mappingForm.ResultPackName);
+        }
+        pack.RoleFiles = mappingForm.ResultRoleFiles;
+        CursorRegistryService.RegisterScheme(pack);
+
+        if (_settings.ActivePackId == pack.Id)
+        {
+            CursorRegistryService.ApplyPack(pack); // live cursor should reflect the edit immediately
+        }
+
+        _saveSettings();
+        RefreshPackList();
     }
 
     private void OnRenamePackClicked(object? sender, EventArgs e)
