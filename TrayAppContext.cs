@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Reflection;
 using MouseCursorSupporter.Core;
 using MouseCursorSupporter.Forms;
 
@@ -5,6 +7,8 @@ namespace MouseCursorSupporter;
 
 public sealed class TrayAppContext : ApplicationContext
 {
+    private static readonly Version CurrentVersion = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0, 0);
+
     private readonly AppSettings _settings;
     private readonly SchedulerEngine _scheduler;
     private readonly NotifyIcon _notifyIcon;
@@ -26,6 +30,8 @@ public sealed class TrayAppContext : ApplicationContext
 
         RebuildMenu();
         _scheduler.Start();
+
+        _ = CheckForUpdatesAsync(auto: true);
     }
 
     private void SaveSettings() => SettingsStore.Save(_settings);
@@ -65,6 +71,10 @@ public sealed class TrayAppContext : ApplicationContext
         settingsItem.Click += (_, _) => OpenSettings();
         menu.Items.Add(settingsItem);
 
+        var updateItem = new ToolStripMenuItem("更新を確認...");
+        updateItem.Click += (_, _) => _ = CheckForUpdatesAsync(auto: false);
+        menu.Items.Add(updateItem);
+
         var exitItem = new ToolStripMenuItem("終了");
         exitItem.Click += (_, _) => ExitApp();
         menu.Items.Add(exitItem);
@@ -93,5 +103,78 @@ public sealed class TrayAppContext : ApplicationContext
         _scheduler.Dispose();
         _notifyIcon.Dispose();
         Application.Exit();
+    }
+
+    /// <summary>
+    /// Checks GitHub Releases for a newer version. When <paramref name="auto"/> is true (startup
+    /// check) this stays silent unless an update is found; a manual check always reports back.
+    /// </summary>
+    private async Task CheckForUpdatesAsync(bool auto)
+    {
+        if (auto && !_settings.CheckForUpdatesOnStartup)
+        {
+            return;
+        }
+
+        var update = await UpdateChecker.CheckForUpdateAsync(CurrentVersion);
+        if (update is null)
+        {
+            if (!auto)
+            {
+                MessageBox.Show("現在お使いのバージョンが最新です。", "アップデートの確認",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            return;
+        }
+
+        if (auto && update.Version.ToString() == _settings.SkippedUpdateVersion)
+        {
+            return;
+        }
+
+        using var prompt = new UpdateAvailableForm(CurrentVersion, update);
+        prompt.ShowDialog();
+
+        switch (prompt.Choice)
+        {
+            case UpdateChoice.Skip:
+                _settings.SkippedUpdateVersion = update.Version.ToString();
+                SaveSettings();
+                break;
+
+            case UpdateChoice.UpdateNow:
+                await DownloadAndLaunchInstallerAsync(update);
+                break;
+        }
+    }
+
+    private async Task DownloadAndLaunchInstallerAsync(UpdateInfo update)
+    {
+        using var downloadForm = new UpdateDownloadForm(update);
+        downloadForm.ShowDialog();
+
+        if (downloadForm.Error is not null)
+        {
+            MessageBox.Show($"ダウンロードに失敗しました。\n{downloadForm.Error.Message}", "アップデート",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        if (downloadForm.DownloadedFilePath is null)
+        {
+            return; // user cancelled the download
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(downloadForm.DownloadedFilePath) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"インストーラーの起動に失敗しました。\n{ex.Message}", "アップデート",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        ExitApp();
     }
 }

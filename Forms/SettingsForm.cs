@@ -28,6 +28,7 @@ public sealed class SettingsForm : Form
 
     // General tab
     private readonly CheckBox _runAtStartupBox = new() { Text = "Windowsログオン時に自動起動する", AutoSize = true };
+    private readonly CheckBox _checkForUpdatesBox = new() { Text = "起動時に更新を自動確認する", AutoSize = true };
 
     private bool _suppressEvents;
 
@@ -600,6 +601,14 @@ public sealed class SettingsForm : Form
         _runAtStartupBox.Checked = StartupRegistration.IsRegistered();
         _runAtStartupBox.CheckedChanged += (_, _) => StartupRegistration.SetEnabled(_runAtStartupBox.Checked);
         layout.Controls.Add(_runAtStartupBox);
+
+        _checkForUpdatesBox.Checked = _settings.CheckForUpdatesOnStartup;
+        _checkForUpdatesBox.CheckedChanged += (_, _) =>
+        {
+            _settings.CheckForUpdatesOnStartup = _checkForUpdatesBox.Checked;
+            _saveSettings();
+        };
+        layout.Controls.Add(_checkForUpdatesBox);
 
         var infoLabel = new Label
         {
