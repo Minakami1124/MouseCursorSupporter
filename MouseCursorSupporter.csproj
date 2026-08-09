@@ -14,4 +14,10 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Needed to decode Shift-JIS (codepage 932) zip entry names; .NET no longer includes
+         legacy codepages by default. -->
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="9.0.0" />
+  </ItemGroup>
+
 </Project>

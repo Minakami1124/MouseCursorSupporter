@@ -1,11 +1,12 @@
+using System.Text;
+
 namespace MouseCursorSupporter.Core;
 
 public static class RoleDetector
 {
-    // Keywords are checked in list order per role; longer/more specific tokens are listed
-    // first so e.g. "斜めに拡大・縮小1" is matched before a bare "斜め" would be (which is
-    // deliberately not listed, since it can't disambiguate SizeNWSE from SizeNESW on its own).
-    private static readonly (CursorRole Role, string[] Keywords)[] Rules =
+    // Checked first, in order; longer/more specific tokens are listed first so e.g.
+    // "斜めに拡大・縮小1" is matched before a bare "斜め" would be.
+    private static readonly (CursorRole Role, string[] Keywords)[] StrongRules =
     [
         (CursorRole.SizeNWSE, ["斜めに拡大・縮小1", "斜めに拡大縮小1", "斜めに拡大縮小１", "斜め1", "斜め１", "diagonal resize 1", "diagonal1", "sizenwse", "nwse"]),
         (CursorRole.SizeNESW, ["斜めに拡大・縮小2", "斜めに拡大縮小2", "斜めに拡大縮小２", "斜め2", "斜め２", "diagonal resize 2", "diagonal2", "sizenesw", "nesw"]),
@@ -26,17 +27,44 @@ public static class RoleDetector
         (CursorRole.Arrow, ["通常の選択", "通常", "normal select", "standard select", "arrow", "pointer"]),
     ];
 
+    // Checked only if nothing above matched, so an unambiguous keyword never loses to a vaguer
+    // one. "斜め" alone (no digit) means SizeNWSE here, for packs that number their second
+    // diagonal cursor ("斜め2") but leave the first one unnumbered - it must run after
+    // StrongRules or it would wrongly swallow "斜め2" filenames too.
+    private static readonly (CursorRole Role, string[] Keywords)[] FallbackRules =
+    [
+        (CursorRole.SizeNWSE, ["斜め"]),
+        (CursorRole.Crosshair, ["領域"]),
+    ];
+
     /// <summary>
     /// Guesses the cursor role for a file based on its name. Returns null when no rule matches.
     /// </summary>
     public static CursorRole? Detect(string fileNameWithoutExtension)
     {
-        var name = fileNameWithoutExtension.ToLowerInvariant();
-        foreach (var (role, keywords) in Rules)
+        // Cursor packs are frequently distributed as zips authored on macOS, whose filesystem
+        // stores filenames with combining marks decomposed (NFD) - e.g. "バ" as "ハ" + a
+        // separate voiced-sound-mark codepoint. Our keyword literals are precomposed (NFC), so
+        // without normalizing both sides here, otherwise-correct keywords like "バックグラウンド"
+        // silently fail to match. Normalizing to NFC makes the comparison encoding-agnostic.
+        var name = fileNameWithoutExtension.Normalize(NormalizationForm.FormC).ToLowerInvariant();
+
+        foreach (var (role, keywords) in StrongRules)
         {
             foreach (var keyword in keywords)
             {
-                if (name.Contains(keyword.ToLowerInvariant()))
+                if (name.Contains(keyword.Normalize(NormalizationForm.FormC).ToLowerInvariant()))
+                {
+                    return role;
+                }
+            }
+        }
+
+        foreach (var (role, keywords) in FallbackRules)
+        {
+            foreach (var keyword in keywords)
+            {
+                if (name.Contains(keyword.Normalize(NormalizationForm.FormC).ToLowerInvariant()))
                 {
                     return role;
                 }

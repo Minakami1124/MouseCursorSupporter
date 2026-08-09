@@ -5,6 +5,13 @@ namespace MouseCursorSupporter.Core;
 
 public static class CursorPackImporter
 {
+    static CursorPackImporter()
+    {
+        // Required for Encoding.GetEncoding(932) (Shift-JIS) below - .NET no longer registers
+        // legacy codepages by default.
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+    }
+
     public sealed class ImportResult
     {
         public required string PackName { get; init; }
@@ -19,9 +26,7 @@ public static class CursorPackImporter
     public static ImportResult Extract(string zipPath, string? packNameOverride = null)
     {
         var packName = packNameOverride ?? Path.GetFileNameWithoutExtension(zipPath);
-        var destFolder = Path.Combine(SettingsStore.CursorPacksDir, MakeSafeFolderName(packName));
-
-        destFolder = EnsureUniqueFolder(destFolder);
+        var destFolder = EnsureUniqueFolder(Path.Combine(SettingsStore.CursorPacksDir, MakeSafeFolderName(packName)));
         Directory.CreateDirectory(destFolder);
 
         // Cursor pack zips are commonly authored on Windows with Shift-JIS entry names.
@@ -45,7 +50,11 @@ public static class CursorPackImporter
                     continue; // directory entry
                 }
 
-                var destPath = Path.Combine(destFolder, entry.Name);
+                // Zips authored on macOS store filenames with combining marks decomposed (NFD -
+                // e.g. "バ" as "ハ" + a separate voiced-sound-mark codepoint). Normalizing to NFC
+                // here keeps on-disk names consistent and matches what RoleDetector expects.
+                var entryName = entry.Name.Normalize(NormalizationForm.FormC);
+                var destPath = Path.Combine(destFolder, entryName);
                 var destDir = Path.GetDirectoryName(destPath);
                 if (!string.IsNullOrEmpty(destDir))
                 {
@@ -56,20 +65,59 @@ public static class CursorPackImporter
             }
         }
 
-        var cursorFiles = Directory.EnumerateFiles(destFolder, "*", SearchOption.AllDirectories)
-            .Where(f => f.EndsWith(".cur", StringComparison.OrdinalIgnoreCase)
-                        || f.EndsWith(".ani", StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        return BuildResult(packName, destFolder);
+    }
 
-        var detection = RoleDetector.DetectAll(cursorFiles);
+    /// <summary>
+    /// Builds a pack from an already-extracted folder of .cur/.ani files (recursively), copying
+    /// them into the app's managed storage so the pack keeps working even if the original folder
+    /// is later moved or deleted.
+    /// </summary>
+    public static ImportResult ImportFromFolder(string sourceFolder, string? packNameOverride = null)
+    {
+        var packName = packNameOverride ?? new DirectoryInfo(sourceFolder).Name;
+        var sourceFiles = Directory.EnumerateFiles(sourceFolder, "*", SearchOption.AllDirectories)
+            .Where(IsCursorFile);
+        return ImportFileList(packName, sourceFiles);
+    }
+
+    /// <summary>Builds a pack from a set of individually selected .cur/.ani files.</summary>
+    public static ImportResult ImportFromFiles(IEnumerable<string> filePaths, string packNameOverride)
+    {
+        return ImportFileList(packNameOverride, filePaths.Where(IsCursorFile));
+    }
+
+    private static ImportResult ImportFileList(string packName, IEnumerable<string> sourceFiles)
+    {
+        var destFolder = EnsureUniqueFolder(Path.Combine(SettingsStore.CursorPacksDir, MakeSafeFolderName(packName)));
+        Directory.CreateDirectory(destFolder);
+
+        foreach (var src in sourceFiles)
+        {
+            var fileName = Path.GetFileName(src).Normalize(NormalizationForm.FormC);
+            var destPath = EnsureUniqueFile(Path.Combine(destFolder, fileName));
+            File.Copy(src, destPath);
+        }
+
+        return BuildResult(packName, destFolder);
+    }
+
+    private static ImportResult BuildResult(string packName, string destFolder)
+    {
+        var cursorFiles = Directory.EnumerateFiles(destFolder, "*", SearchOption.AllDirectories)
+            .Where(IsCursorFile)
+            .ToList();
 
         return new ImportResult
         {
             PackName = packName,
             FolderPath = destFolder,
-            Detection = detection,
+            Detection = RoleDetector.DetectAll(cursorFiles),
         };
     }
+
+    private static bool IsCursorFile(string path) =>
+        path.EndsWith(".cur", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".ani", StringComparison.OrdinalIgnoreCase);
 
     private static string EnsureUniqueFolder(string desiredPath)
     {
@@ -85,6 +133,28 @@ public static class CursorPackImporter
             candidate = $"{desiredPath} ({i})";
             i++;
         } while (Directory.Exists(candidate));
+
+        return candidate;
+    }
+
+    private static string EnsureUniqueFile(string desiredPath)
+    {
+        if (!File.Exists(desiredPath))
+        {
+            return desiredPath;
+        }
+
+        var dir = Path.GetDirectoryName(desiredPath)!;
+        var name = Path.GetFileNameWithoutExtension(desiredPath);
+        var ext = Path.GetExtension(desiredPath);
+
+        var i = 2;
+        string candidate;
+        do
+        {
+            candidate = Path.Combine(dir, $"{name} ({i}){ext}");
+            i++;
+        } while (File.Exists(candidate));
 
         return candidate;
     }

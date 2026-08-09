@@ -68,13 +68,19 @@ public sealed class SettingsForm : Form
         layout.Controls.Add(_packListBox, 0, 0);
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
-        var addButton = new Button { Text = "ZIPから追加...", AutoSize = true };
-        addButton.Click += OnAddPackClicked;
+        var addZipButton = new Button { Text = "ZIPから追加...", AutoSize = true };
+        addZipButton.Click += OnAddPackFromZipClicked;
+        var addFolderButton = new Button { Text = "フォルダから追加...", AutoSize = true };
+        addFolderButton.Click += OnAddPackFromFolderClicked;
+        var addFilesButton = new Button { Text = "ファイルから追加...", AutoSize = true };
+        addFilesButton.Click += OnAddPackFromFilesClicked;
         var renameButton = new Button { Text = "名前を変更", AutoSize = true };
         renameButton.Click += OnRenamePackClicked;
         var removeButton = new Button { Text = "削除", AutoSize = true };
         removeButton.Click += OnRemovePackClicked;
-        buttons.Controls.Add(addButton);
+        buttons.Controls.Add(addZipButton);
+        buttons.Controls.Add(addFolderButton);
+        buttons.Controls.Add(addFilesButton);
         buttons.Controls.Add(renameButton);
         buttons.Controls.Add(removeButton);
         layout.Controls.Add(buttons, 0, 1);
@@ -100,7 +106,7 @@ public sealed class SettingsForm : Form
         RefreshTimeSlotPackColumn();
     }
 
-    private void OnAddPackClicked(object? sender, EventArgs e)
+    private void OnAddPackFromZipClicked(object? sender, EventArgs e)
     {
         using var dialog = new OpenFileDialog
         {
@@ -112,14 +118,60 @@ public sealed class SettingsForm : Form
             return;
         }
 
+        ImportAndConfirmPack(() => CursorPackImporter.Extract(dialog.FileName), "ZIPの展開に失敗しました。");
+    }
+
+    private void OnAddPackFromFolderClicked(object? sender, EventArgs e)
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "カーソルファイル(.cur/.ani)が入ったフォルダを選択してください",
+            UseDescriptionForTitle = true,
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        ImportAndConfirmPack(() => CursorPackImporter.ImportFromFolder(dialog.SelectedPath), "フォルダの読み込みに失敗しました。");
+    }
+
+    private void OnAddPackFromFilesClicked(object? sender, EventArgs e)
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "カーソルファイルを選択(複数選択可)",
+            Filter = "カーソルファイル (*.cur;*.ani)|*.cur;*.ani",
+            Multiselect = true,
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        var suggestedName = PromptText(this, "デザイン名を入力してください:", "新しいデザイン");
+        if (string.IsNullOrWhiteSpace(suggestedName))
+        {
+            return;
+        }
+
+        ImportAndConfirmPack(() => CursorPackImporter.ImportFromFiles(dialog.FileNames, suggestedName), "ファイルの読み込みに失敗しました。");
+    }
+
+    /// <summary>
+    /// Shared tail end of every "add pack" flow (ZIP/folder/files): run the importer, let the
+    /// user review/fix the auto-detected role mapping, then register the resulting pack.
+    /// </summary>
+    private void ImportAndConfirmPack(Func<CursorPackImporter.ImportResult> import, string failureMessage)
+    {
         CursorPackImporter.ImportResult imported;
         try
         {
-            imported = CursorPackImporter.Extract(dialog.FileName);
+            imported = import();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"ZIPの展開に失敗しました。\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, $"{failureMessage}\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
@@ -127,7 +179,7 @@ public sealed class SettingsForm : Form
         using var mappingForm = new RoleMappingForm(imported.PackName, imported.FolderPath, imported.Detection, existingNames);
         if (mappingForm.ShowDialog(this) != DialogResult.OK)
         {
-            // User cancelled: remove the extracted files so we don't leave orphaned folders.
+            // User cancelled: remove the copied/extracted files so we don't leave orphaned folders.
             try { Directory.Delete(imported.FolderPath, recursive: true); } catch { /* best effort cleanup */ }
             return;
         }
@@ -376,18 +428,27 @@ public sealed class SettingsForm : Form
         var page = new TabPage("スケジュール");
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(10), AutoSize = true };
 
+        // All three mode radio buttons must be direct children of the SAME container: WinForms
+        // groups radio buttons for mutual exclusivity by immediate parent, not by form/tab, so
+        // nesting _modeInterval in its own sub-panel (as before) silently let it be checked
+        // alongside the other two instead of replacing them.
         var modeGroup = new GroupBox { Text = "切替モード", AutoSize = true, Dock = DockStyle.Top, Height = 110 };
-        var modeFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(8) };
-        modeFlow.Controls.Add(_modeManual);
+        var modeTable = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 3, Padding = new Padding(8), AutoSize = true };
+        modeTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        modeTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        modeTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        var intervalRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
-        intervalRow.Controls.Add(_modeInterval);
-        intervalRow.Controls.Add(_intervalMinutes);
-        intervalRow.Controls.Add(new Label { Text = "分ごと", AutoSize = true, Padding = new Padding(4, 6, 0, 0) });
-        modeFlow.Controls.Add(intervalRow);
+        modeTable.Controls.Add(_modeManual, 0, 0);
+        modeTable.SetColumnSpan(_modeManual, 3);
 
-        modeFlow.Controls.Add(_modeTimeOfDay);
-        modeGroup.Controls.Add(modeFlow);
+        modeTable.Controls.Add(_modeInterval, 0, 1);
+        modeTable.Controls.Add(_intervalMinutes, 1, 1);
+        modeTable.Controls.Add(new Label { Text = "分ごと", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(4, 6, 0, 0) }, 2, 1);
+
+        modeTable.Controls.Add(_modeTimeOfDay, 0, 2);
+        modeTable.SetColumnSpan(_modeTimeOfDay, 3);
+
+        modeGroup.Controls.Add(modeTable);
         layout.Controls.Add(modeGroup);
 
         _switchOnStartup.Margin = new Padding(0, 6, 0, 6);
