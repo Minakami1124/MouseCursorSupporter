@@ -1,0 +1,643 @@
+using MouseCursorSupporter.Core;
+
+namespace MouseCursorSupporter.Forms;
+
+public sealed class SettingsForm : Form
+{
+    private readonly AppSettings _settings;
+    private readonly Action _saveSettings;
+    private readonly SchedulerEngine _scheduler;
+
+    // Packs tab
+    private readonly ListBox _packListBox = new() { Dock = DockStyle.Fill };
+
+    // Lists tab
+    private readonly ListBox _listListBox = new() { Dock = DockStyle.Fill };
+    private readonly CheckedListBox _listMembersBox = new() { Dock = DockStyle.Fill, CheckOnClick = true };
+
+    // Schedule tab
+    private readonly RadioButton _modeManual = new() { Text = "手動切替のみ", AutoSize = true };
+    private readonly RadioButton _modeInterval = new() { Text = "一定間隔で自動切替", AutoSize = true };
+    private readonly RadioButton _modeTimeOfDay = new() { Text = "時間帯で自動切替", AutoSize = true };
+    private readonly NumericUpDown _intervalMinutes = new() { Minimum = 1, Maximum = 1440, Width = 70 };
+    private readonly CheckBox _switchOnStartup = new() { Text = "Windows起動/ログオン時にも切り替える", AutoSize = true };
+    private readonly RadioButton _selectSequential = new() { Text = "順番にローテーション", AutoSize = true };
+    private readonly RadioButton _selectRandom = new() { Text = "ランダム", AutoSize = true };
+    private readonly ComboBox _activeListCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
+    private readonly DataGridView _timeSlotGrid = new() { Dock = DockStyle.Fill, AllowUserToAddRows = false };
+
+    // General tab
+    private readonly CheckBox _runAtStartupBox = new() { Text = "Windowsログオン時に自動起動する", AutoSize = true };
+
+    private bool _suppressEvents;
+
+    public SettingsForm(AppSettings settings, Action saveSettings, SchedulerEngine scheduler)
+    {
+        _settings = settings;
+        _saveSettings = saveSettings;
+        _scheduler = scheduler;
+
+        Text = "マウスカーソル自動切替 - 設定";
+        Width = 640;
+        Height = 560;
+        StartPosition = FormStartPosition.CenterScreen;
+
+        var tabs = new TabControl { Dock = DockStyle.Fill };
+        tabs.TabPages.Add(BuildPacksTab());
+        tabs.TabPages.Add(BuildListsTab());
+        tabs.TabPages.Add(BuildScheduleTab());
+        tabs.TabPages.Add(BuildGeneralTab());
+        Controls.Add(tabs);
+
+        RefreshPackList();
+        RefreshListList();
+        LoadScheduleUi();
+    }
+
+    // ----- Packs tab -----------------------------------------------------
+
+    private TabPage BuildPacksTab()
+    {
+        var page = new TabPage("パック管理");
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(10) };
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        _packListBox.DisplayMember = "Name";
+        layout.Controls.Add(_packListBox, 0, 0);
+
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+        var addButton = new Button { Text = "ZIPから追加...", AutoSize = true };
+        addButton.Click += OnAddPackClicked;
+        var renameButton = new Button { Text = "名前を変更", AutoSize = true };
+        renameButton.Click += OnRenamePackClicked;
+        var removeButton = new Button { Text = "削除", AutoSize = true };
+        removeButton.Click += OnRemovePackClicked;
+        buttons.Controls.Add(addButton);
+        buttons.Controls.Add(renameButton);
+        buttons.Controls.Add(removeButton);
+        layout.Controls.Add(buttons, 0, 1);
+
+        page.Controls.Add(layout);
+        return page;
+    }
+
+    private void RefreshPackList()
+    {
+        var selected = _packListBox.SelectedItem as CursorPack;
+        _packListBox.DataSource = null;
+        _packListBox.DataSource = _settings.Packs;
+        _packListBox.DisplayMember = "Name";
+        if (selected is not null)
+        {
+            var again = _settings.Packs.FirstOrDefault(p => p.Id == selected.Id);
+            _packListBox.SelectedItem = again;
+        }
+
+        RefreshListMembersSource();
+        RefreshActiveListCombo();
+        RefreshTimeSlotPackColumn();
+    }
+
+    private void OnAddPackClicked(object? sender, EventArgs e)
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "マウスカーソルのZIPファイルを選択",
+            Filter = "ZIPファイル (*.zip)|*.zip",
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        CursorPackImporter.ImportResult imported;
+        try
+        {
+            imported = CursorPackImporter.Extract(dialog.FileName);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"ZIPの展開に失敗しました。\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        var existingNames = _settings.Packs.Select(p => p.Name).ToHashSet();
+        using var mappingForm = new RoleMappingForm(imported.PackName, imported.FolderPath, imported.Detection, existingNames);
+        if (mappingForm.ShowDialog(this) != DialogResult.OK)
+        {
+            // User cancelled: remove the extracted files so we don't leave orphaned folders.
+            try { Directory.Delete(imported.FolderPath, recursive: true); } catch { /* best effort cleanup */ }
+            return;
+        }
+
+        var pack = new CursorPack
+        {
+            Name = mappingForm.ResultPackName,
+            FolderPath = imported.FolderPath,
+            SchemeName = MakeUniqueSchemeName(mappingForm.ResultPackName),
+            RoleFiles = mappingForm.ResultRoleFiles,
+        };
+
+        CursorRegistryService.RegisterScheme(pack);
+        _settings.Packs.Add(pack);
+        _saveSettings();
+        RefreshPackList();
+    }
+
+    private static string MakeUniqueSchemeName(string baseName)
+    {
+        // Scheme names live in HKCU\...\Cursors\Schemes alongside the user's other cursor
+        // schemes, so avoid clobbering an unrelated scheme that happens to share the name.
+        var candidate = baseName;
+        var i = 2;
+        while (Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Cursors\Schemes")?.GetValue(candidate) is not null)
+        {
+            candidate = $"{baseName} ({i++})";
+        }
+        return candidate;
+    }
+
+    private void OnRenamePackClicked(object? sender, EventArgs e)
+    {
+        if (_packListBox.SelectedItem is not CursorPack pack)
+        {
+            return;
+        }
+
+        var newName = PromptText(this, "新しいデザイン名を入力してください:", pack.Name);
+        if (string.IsNullOrWhiteSpace(newName) || newName == pack.Name)
+        {
+            return;
+        }
+        if (_settings.Packs.Any(p => p.Id != pack.Id && p.Name == newName))
+        {
+            MessageBox.Show(this, "同じ名前のデザインが既に存在します。", "確認", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        CursorRegistryService.RemoveScheme(pack.SchemeName);
+        pack.Name = newName;
+        pack.SchemeName = MakeUniqueSchemeName(newName);
+        CursorRegistryService.RegisterScheme(pack);
+
+        if (_settings.ActivePackId == pack.Id)
+        {
+            CursorRegistryService.ApplyPack(pack); // keep the "current cursor name" display in sync
+        }
+
+        _saveSettings();
+        RefreshPackList();
+    }
+
+    private void OnRemovePackClicked(object? sender, EventArgs e)
+    {
+        if (_packListBox.SelectedItem is not CursorPack pack)
+        {
+            return;
+        }
+
+        if (MessageBox.Show(this, $"「{pack.Name}」を削除しますか?\n展開済みのカーソルファイルも削除されます。",
+                "確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        CursorRegistryService.RemoveScheme(pack.SchemeName);
+        _settings.Packs.Remove(pack);
+        foreach (var list in _settings.Lists)
+        {
+            list.PackIds.Remove(pack.Id);
+        }
+        _settings.Schedule.TimeSlots.RemoveAll(s => s.PackId == pack.Id);
+        if (_settings.ActivePackId == pack.Id)
+        {
+            _settings.ActivePackId = null;
+        }
+
+        try { Directory.Delete(pack.FolderPath, recursive: true); } catch { /* best effort cleanup */ }
+
+        _saveSettings();
+        RefreshPackList();
+        RefreshTimeSlotGridRows();
+    }
+
+    // ----- Lists tab -------------------------------------------------------
+
+    private TabPage BuildListsTab()
+    {
+        var page = new TabPage("リスト管理");
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(10) };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        _listListBox.DisplayMember = "Name";
+        _listListBox.SelectedIndexChanged += (_, _) => RefreshListMembersSource();
+        layout.Controls.Add(_listListBox, 0, 0);
+
+        var membersGroup = new GroupBox { Text = "リストに含めるデザイン", Dock = DockStyle.Fill };
+        _listMembersBox.Dock = DockStyle.Fill;
+        _listMembersBox.ItemCheck += OnListMemberCheckChanged;
+        membersGroup.Controls.Add(_listMembersBox);
+        layout.Controls.Add(membersGroup, 1, 0);
+
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+        var addButton = new Button { Text = "新規作成", AutoSize = true };
+        addButton.Click += OnAddListClicked;
+        var renameButton = new Button { Text = "名前を変更", AutoSize = true };
+        renameButton.Click += OnRenameListClicked;
+        var removeButton = new Button { Text = "削除", AutoSize = true };
+        removeButton.Click += OnRemoveListClicked;
+        buttons.Controls.Add(addButton);
+        buttons.Controls.Add(renameButton);
+        buttons.Controls.Add(removeButton);
+        layout.Controls.Add(buttons, 0, 1);
+        layout.SetColumnSpan(buttons, 2);
+
+        page.Controls.Add(layout);
+        return page;
+    }
+
+    private void RefreshListList()
+    {
+        var selected = _listListBox.SelectedItem as CursorListModel;
+        _listListBox.DataSource = null;
+        _listListBox.DataSource = _settings.Lists;
+        _listListBox.DisplayMember = "Name";
+        if (selected is not null)
+        {
+            _listListBox.SelectedItem = _settings.Lists.FirstOrDefault(l => l.Id == selected.Id);
+        }
+        RefreshListMembersSource();
+    }
+
+    private void RefreshListMembersSource()
+    {
+        _suppressEvents = true;
+        _listMembersBox.Items.Clear();
+        var selectedList = _listListBox.SelectedItem as CursorListModel;
+        foreach (var pack in _settings.Packs)
+        {
+            var isChecked = selectedList is not null && selectedList.PackIds.Contains(pack.Id);
+            _listMembersBox.Items.Add(pack, isChecked);
+        }
+        _suppressEvents = false;
+    }
+
+    private void OnListMemberCheckChanged(object? sender, ItemCheckEventArgs e)
+    {
+        if (_suppressEvents)
+        {
+            return;
+        }
+        if (_listListBox.SelectedItem is not CursorListModel list)
+        {
+            return;
+        }
+        if (_listMembersBox.Items[e.Index] is not CursorPack pack)
+        {
+            return;
+        }
+
+        // Fires before the check state actually changes, so use e.NewValue.
+        BeginInvoke(() =>
+        {
+            if (e.NewValue == CheckState.Checked)
+            {
+                if (!list.PackIds.Contains(pack.Id)) list.PackIds.Add(pack.Id);
+            }
+            else
+            {
+                list.PackIds.Remove(pack.Id);
+            }
+            _saveSettings();
+        });
+    }
+
+    private void OnAddListClicked(object? sender, EventArgs e)
+    {
+        var name = PromptText(this, "新しいリスト名を入力してください:", "新しいリスト");
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+        var list = new CursorListModel { Name = name };
+        _settings.Lists.Add(list);
+        _saveSettings();
+        RefreshListList();
+        RefreshActiveListCombo();
+        _listListBox.SelectedItem = list;
+    }
+
+    private void OnRenameListClicked(object? sender, EventArgs e)
+    {
+        if (_listListBox.SelectedItem is not CursorListModel list)
+        {
+            return;
+        }
+        var newName = PromptText(this, "新しいリスト名を入力してください:", list.Name);
+        if (string.IsNullOrWhiteSpace(newName))
+        {
+            return;
+        }
+        list.Name = newName;
+        _saveSettings();
+        RefreshListList();
+        RefreshActiveListCombo();
+    }
+
+    private void OnRemoveListClicked(object? sender, EventArgs e)
+    {
+        if (_listListBox.SelectedItem is not CursorListModel list)
+        {
+            return;
+        }
+        if (MessageBox.Show(this, $"リスト「{list.Name}」を削除しますか?", "確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+        {
+            return;
+        }
+        _settings.Lists.Remove(list);
+        if (_settings.Schedule.ActiveListId == list.Id)
+        {
+            _settings.Schedule.ActiveListId = null;
+        }
+        _saveSettings();
+        RefreshListList();
+        RefreshActiveListCombo();
+    }
+
+    // ----- Schedule tab ------------------------------------------------
+
+    private TabPage BuildScheduleTab()
+    {
+        var page = new TabPage("スケジュール");
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(10), AutoSize = true };
+
+        var modeGroup = new GroupBox { Text = "切替モード", AutoSize = true, Dock = DockStyle.Top, Height = 110 };
+        var modeFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(8) };
+        modeFlow.Controls.Add(_modeManual);
+
+        var intervalRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+        intervalRow.Controls.Add(_modeInterval);
+        intervalRow.Controls.Add(_intervalMinutes);
+        intervalRow.Controls.Add(new Label { Text = "分ごと", AutoSize = true, Padding = new Padding(4, 6, 0, 0) });
+        modeFlow.Controls.Add(intervalRow);
+
+        modeFlow.Controls.Add(_modeTimeOfDay);
+        modeGroup.Controls.Add(modeFlow);
+        layout.Controls.Add(modeGroup);
+
+        _switchOnStartup.Margin = new Padding(0, 6, 0, 6);
+        layout.Controls.Add(_switchOnStartup);
+
+        var selectionGroup = new GroupBox { Text = "選択方法(一定間隔・起動時に使用)", AutoSize = true, Dock = DockStyle.Top, Height = 100 };
+        var selectionFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(8) };
+        selectionFlow.Controls.Add(_selectSequential);
+        selectionFlow.Controls.Add(_selectRandom);
+        var listRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+        listRow.Controls.Add(new Label { Text = "対象リスト:", AutoSize = true, Padding = new Padding(0, 6, 6, 0) });
+        listRow.Controls.Add(_activeListCombo);
+        selectionFlow.Controls.Add(listRow);
+        selectionGroup.Controls.Add(selectionFlow);
+        layout.Controls.Add(selectionGroup);
+
+        var slotGroup = new GroupBox { Text = "時間帯テーブル(時間帯で自動切替を選択時)", Dock = DockStyle.Top, Height = 220 };
+        var slotLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        slotLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        slotLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        _timeSlotGrid.AutoGenerateColumns = false;
+        _timeSlotGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Time", HeaderText = "開始時刻 (HH:mm)", Width = 140 });
+        var packColumn = new DataGridViewComboBoxColumn { Name = "Pack", HeaderText = "デザイン", Width = 250, DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton };
+        _timeSlotGrid.Columns.Add(packColumn);
+        _timeSlotGrid.CellEndEdit += OnTimeSlotCellEndEdit;
+        slotLayout.Controls.Add(_timeSlotGrid, 0, 0);
+
+        var slotButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+        var addSlotButton = new Button { Text = "行を追加", AutoSize = true };
+        addSlotButton.Click += OnAddTimeSlotClicked;
+        var removeSlotButton = new Button { Text = "選択行を削除", AutoSize = true };
+        removeSlotButton.Click += OnRemoveTimeSlotClicked;
+        slotButtons.Controls.Add(addSlotButton);
+        slotButtons.Controls.Add(removeSlotButton);
+        slotLayout.Controls.Add(slotButtons, 0, 1);
+
+        slotGroup.Controls.Add(slotLayout);
+        layout.Controls.Add(slotGroup);
+
+        page.Controls.Add(layout);
+
+        _modeManual.CheckedChanged += (_, _) => OnScheduleControlsChanged();
+        _modeInterval.CheckedChanged += (_, _) => OnScheduleControlsChanged();
+        _modeTimeOfDay.CheckedChanged += (_, _) => OnScheduleControlsChanged();
+        _intervalMinutes.ValueChanged += (_, _) => OnScheduleControlsChanged();
+        _switchOnStartup.CheckedChanged += (_, _) => OnScheduleControlsChanged();
+        _selectSequential.CheckedChanged += (_, _) => OnScheduleControlsChanged();
+        _selectRandom.CheckedChanged += (_, _) => OnScheduleControlsChanged();
+        _activeListCombo.SelectedIndexChanged += (_, _) => OnScheduleControlsChanged();
+
+        return page;
+    }
+
+    private void LoadScheduleUi()
+    {
+        _suppressEvents = true;
+        var schedule = _settings.Schedule;
+        _modeManual.Checked = schedule.Mode == ScheduleMode.Manual;
+        _modeInterval.Checked = schedule.Mode == ScheduleMode.Interval;
+        _modeTimeOfDay.Checked = schedule.Mode == ScheduleMode.TimeOfDay;
+        _intervalMinutes.Value = Math.Clamp(schedule.IntervalMinutes, 1, 1440);
+        _switchOnStartup.Checked = schedule.SwitchOnStartup;
+        _selectSequential.Checked = schedule.SelectionMode == CursorSelectionMode.Sequential;
+        _selectRandom.Checked = schedule.SelectionMode == CursorSelectionMode.Random;
+        _suppressEvents = false;
+
+        RefreshActiveListCombo();
+        RefreshTimeSlotGridRows();
+        UpdateScheduleControlsEnabled();
+    }
+
+    private void RefreshActiveListCombo()
+    {
+        var previousId = _settings.Schedule.ActiveListId;
+        _suppressEvents = true;
+        _activeListCombo.Items.Clear();
+        _activeListCombo.Items.Add("(すべてのデザイン)");
+        foreach (var list in _settings.Lists)
+        {
+            _activeListCombo.Items.Add(list);
+        }
+        var match = previousId is null ? 0 : _settings.Lists.FindIndex(l => l.Id == previousId) + 1;
+        _activeListCombo.SelectedIndex = match >= 0 ? match : 0;
+        _suppressEvents = false;
+    }
+
+    private void RefreshTimeSlotPackColumn()
+    {
+        if (_timeSlotGrid.Columns["Pack"] is DataGridViewComboBoxColumn packColumn)
+        {
+            packColumn.DataSource = null;
+            packColumn.DataSource = _settings.Packs.ToList();
+            packColumn.DisplayMember = "Name";
+            packColumn.ValueMember = "Id";
+        }
+    }
+
+    private void RefreshTimeSlotGridRows()
+    {
+        RefreshTimeSlotPackColumn();
+        _suppressEvents = true;
+        _timeSlotGrid.Rows.Clear();
+        foreach (var slot in _settings.Schedule.TimeSlots.OrderBy(s => s.StartMinutes))
+        {
+            var timeText = TimeSpan.FromMinutes(slot.StartMinutes).ToString(@"hh\:mm");
+            var rowIndex = _timeSlotGrid.Rows.Add(timeText, slot.PackId);
+            _timeSlotGrid.Rows[rowIndex].Tag = slot;
+        }
+        _suppressEvents = false;
+    }
+
+    private void OnAddTimeSlotClicked(object? sender, EventArgs e)
+    {
+        if (_settings.Packs.Count == 0)
+        {
+            MessageBox.Show(this, "先に「パック管理」タブでデザインを登録してください。", "確認", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var slot = new TimeSlotEntry { StartMinutes = 0, PackId = _settings.Packs[0].Id };
+        _settings.Schedule.TimeSlots.Add(slot);
+        _saveSettings();
+        RefreshTimeSlotGridRows();
+    }
+
+    private void OnRemoveTimeSlotClicked(object? sender, EventArgs e)
+    {
+        if (_timeSlotGrid.CurrentRow?.Tag is TimeSlotEntry slot)
+        {
+            _settings.Schedule.TimeSlots.Remove(slot);
+            _saveSettings();
+            RefreshTimeSlotGridRows();
+        }
+    }
+
+    private void OnTimeSlotCellEndEdit(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (_suppressEvents)
+        {
+            return;
+        }
+        var row = _timeSlotGrid.Rows[e.RowIndex];
+        if (row.Tag is not TimeSlotEntry slot)
+        {
+            return;
+        }
+
+        if (e.ColumnIndex == _timeSlotGrid.Columns["Time"]!.Index)
+        {
+            var text = row.Cells["Time"].Value?.ToString() ?? "";
+            if (TimeSpan.TryParseExact(text, @"hh\:mm", null, out var time) ||
+                TimeSpan.TryParse(text, out time))
+            {
+                slot.StartMinutes = (int)time.TotalMinutes;
+            }
+            else
+            {
+                MessageBox.Show(this, "時刻は HH:mm 形式で入力してください (例: 09:00)。", "確認", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                row.Cells["Time"].Value = TimeSpan.FromMinutes(slot.StartMinutes).ToString(@"hh\:mm");
+                return;
+            }
+        }
+        else if (e.ColumnIndex == _timeSlotGrid.Columns["Pack"]!.Index)
+        {
+            if (row.Cells["Pack"].Value is string packId)
+            {
+                slot.PackId = packId;
+            }
+        }
+
+        _saveSettings();
+    }
+
+    private void OnScheduleControlsChanged()
+    {
+        if (_suppressEvents)
+        {
+            return;
+        }
+
+        var schedule = _settings.Schedule;
+        schedule.Mode = _modeInterval.Checked ? ScheduleMode.Interval
+            : _modeTimeOfDay.Checked ? ScheduleMode.TimeOfDay
+            : ScheduleMode.Manual;
+        schedule.IntervalMinutes = (int)_intervalMinutes.Value;
+        schedule.SwitchOnStartup = _switchOnStartup.Checked;
+        schedule.SelectionMode = _selectRandom.Checked ? CursorSelectionMode.Random : CursorSelectionMode.Sequential;
+        schedule.ActiveListId = _activeListCombo.SelectedItem is CursorListModel list ? list.Id : null;
+
+        UpdateScheduleControlsEnabled();
+        _saveSettings();
+        _scheduler.OnSettingsChanged();
+    }
+
+    private void UpdateScheduleControlsEnabled()
+    {
+        _intervalMinutes.Enabled = _modeInterval.Checked;
+        _timeSlotGrid.Enabled = _modeTimeOfDay.Checked;
+        var selectionRelevant = _modeInterval.Checked || _switchOnStartup.Checked;
+        _selectSequential.Enabled = selectionRelevant;
+        _selectRandom.Enabled = selectionRelevant;
+    }
+
+    // ----- General tab ---------------------------------------------------
+
+    private TabPage BuildGeneralTab()
+    {
+        var page = new TabPage("全般");
+        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, Padding = new Padding(14), AutoSize = true };
+
+        _runAtStartupBox.Checked = StartupRegistration.IsRegistered();
+        _runAtStartupBox.CheckedChanged += (_, _) => StartupRegistration.SetEnabled(_runAtStartupBox.Checked);
+        layout.Controls.Add(_runAtStartupBox);
+
+        var infoLabel = new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(560, 0),
+            Margin = new Padding(0, 16, 0, 0),
+            Text = $"インポートしたカーソルファイルの保存場所:\n{SettingsStore.CursorPacksDir}\n\n" +
+                   "デザインは Windows の「マウスのプロパティ > ポインター」の一覧にも表示され、そちらから選択することもできます。",
+        };
+        layout.Controls.Add(infoLabel);
+
+        page.Controls.Add(layout);
+        return page;
+    }
+
+    private static string? PromptText(IWin32Window owner, string prompt, string defaultValue)
+    {
+        using var dialog = new Form
+        {
+            Text = "入力",
+            Width = 420,
+            Height = 150,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false,
+            MaximizeBox = false,
+        };
+        var label = new Label { Text = prompt, AutoSize = true, Left = 12, Top = 12 };
+        var textBox = new TextBox { Text = defaultValue, Left = 12, Top = 36, Width = 380 };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 216, Top = 70, Width = 80 };
+        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Left = 312, Top = 70, Width = 80 };
+        dialog.Controls.Add(label);
+        dialog.Controls.Add(textBox);
+        dialog.Controls.Add(ok);
+        dialog.Controls.Add(cancel);
+        dialog.AcceptButton = ok;
+        dialog.CancelButton = cancel;
+
+        return dialog.ShowDialog(owner) == DialogResult.OK ? textBox.Text.Trim() : null;
+    }
+}

@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+publish/
+Output/
+*.ico.bak
+
+# Cursor pack sample assets are third-party fan-made art (not ours to redistribute).
+Samples/
