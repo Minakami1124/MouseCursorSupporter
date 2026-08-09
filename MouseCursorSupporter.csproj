@@ -10,7 +10,7 @@
     <AssemblyName>MouseCursorSupporter</AssemblyName>
     <Product>マウスカーソル自動切替</Product>
     <Company>ryokamur</Company>
-    <Version>0.6.0</Version>
+    <Version>0.7.0</Version>
     <!-- InvariantGlobalization was removed: under it, string.Normalize(NormalizationForm.FormC)
          silently fails to recompose decomposed (NFD) Japanese kana (e.g. combining voiced sound
          marks), which broke role auto-detection for cursor packs whose zip entry names use NFD
