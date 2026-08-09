@@ -292,6 +292,7 @@ public sealed class SettingsForm : Form
 
         var membersGroup = new GroupBox { Text = "リストに含めるデザイン", Dock = DockStyle.Fill };
         _listMembersBox.Dock = DockStyle.Fill;
+        _listMembersBox.DisplayMember = "Name";
         _listMembersBox.ItemCheck += OnListMemberCheckChanged;
         membersGroup.Controls.Add(_listMembersBox);
         layout.Controls.Add(membersGroup, 1, 0);
