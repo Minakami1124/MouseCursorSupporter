@@ -10,7 +10,7 @@
     <AssemblyName>MouseCursorSupporter</AssemblyName>
     <Product>マウスカーソル自動切替</Product>
     <Company>ryokamur</Company>
-    <Version>0.5.0</Version>
+    <Version>0.6.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <!-- NU1510: the Windows Desktop shared framework already carries this, but keeping the
          reference explicit documents why Shift-JIS zip entry names decode correctly. -->
