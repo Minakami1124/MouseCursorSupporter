@@ -10,6 +10,7 @@ public sealed class SettingsForm : Form
 
     // Packs tab
     private readonly ListBox _packListBox = new() { Dock = DockStyle.Fill };
+    private readonly Label _activePackLabel = new() { AutoSize = true, Padding = new Padding(0, 0, 0, 6), Font = new Font(Control.DefaultFont, FontStyle.Bold) };
 
     // Lists tab
     private readonly ListBox _listListBox = new() { Dock = DockStyle.Fill };
@@ -60,14 +61,20 @@ public sealed class SettingsForm : Form
     private TabPage BuildPacksTab()
     {
         var page = new TabPage("パック管理");
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(10) };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(10) };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
+        layout.Controls.Add(_activePackLabel, 0, 0);
+
         _packListBox.DisplayMember = "Name";
-        layout.Controls.Add(_packListBox, 0, 0);
+        _packListBox.DoubleClick += (_, _) => ApplySelectedPack();
+        layout.Controls.Add(_packListBox, 0, 1);
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+        var applyButton = new Button { Text = "このデザインに切り替える", AutoSize = true };
+        applyButton.Click += (_, _) => ApplySelectedPack();
         var addZipButton = new Button { Text = "ZIPから追加...", AutoSize = true };
         addZipButton.Click += OnAddPackFromZipClicked;
         var addFolderButton = new Button { Text = "フォルダから追加...", AutoSize = true };
@@ -82,6 +89,7 @@ public sealed class SettingsForm : Form
         renameButton.Click += OnRenamePackClicked;
         var removeButton = new Button { Text = "削除", AutoSize = true };
         removeButton.Click += OnRemovePackClicked;
+        buttons.Controls.Add(applyButton);
         buttons.Controls.Add(addZipButton);
         buttons.Controls.Add(addFolderButton);
         buttons.Controls.Add(addFilesButton);
@@ -89,10 +97,20 @@ public sealed class SettingsForm : Form
         buttons.Controls.Add(editButton);
         buttons.Controls.Add(renameButton);
         buttons.Controls.Add(removeButton);
-        layout.Controls.Add(buttons, 0, 1);
+        layout.Controls.Add(buttons, 0, 2);
 
         page.Controls.Add(layout);
         return page;
+    }
+
+    private void ApplySelectedPack()
+    {
+        if (_packListBox.SelectedItem is not CursorPack pack)
+        {
+            return;
+        }
+        _scheduler.ApplyPackDirect(pack);
+        RefreshPackList();
     }
 
     private void RefreshPackList()
@@ -106,6 +124,9 @@ public sealed class SettingsForm : Form
             var again = _settings.Packs.FirstOrDefault(p => p.Id == selected.Id);
             _packListBox.SelectedItem = again;
         }
+
+        var activePack = _settings.Packs.FirstOrDefault(p => p.Id == _settings.ActivePackId);
+        _activePackLabel.Text = $"現在適用中: {(activePack?.Name ?? "未設定")}";
 
         RefreshListMembersSource();
         RefreshActiveListCombo();

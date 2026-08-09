@@ -34,6 +34,11 @@ public sealed class TrayAppContext : ApplicationContext
         _ = CheckForUpdatesAsync(auto: true);
     }
 
+    // WinForms context menus can get clipped by the screen edge/taskbar once they have enough
+    // items (observed with large pack collections), so the tray submenu is capped and the full,
+    // properly-scrollable list lives in Settings > パック管理 instead.
+    private const int MaxDesignsInTrayMenu = 15;
+
     private void SaveSettings() => SettingsStore.Save(_settings);
 
     private void RebuildMenu()
@@ -52,11 +57,27 @@ public sealed class TrayAppContext : ApplicationContext
         }
         else
         {
-            foreach (var pack in _settings.Packs)
+            // Always keep the active pack visible even if it would otherwise fall outside the cap.
+            var visiblePacks = _settings.Packs.Take(MaxDesignsInTrayMenu).ToList();
+            if (activePack is not null && !visiblePacks.Contains(activePack))
+            {
+                visiblePacks[^1] = activePack;
+            }
+
+            foreach (var pack in visiblePacks)
             {
                 var item = new ToolStripMenuItem(pack.Name) { Checked = pack.Id == _settings.ActivePackId };
                 item.Click += (_, _) => _scheduler.ApplyPackDirect(pack);
                 designsItem.DropDownItems.Add(item);
+            }
+
+            var hiddenCount = _settings.Packs.Count - visiblePacks.Count;
+            if (hiddenCount > 0)
+            {
+                designsItem.DropDownItems.Add(new ToolStripSeparator());
+                var moreItem = new ToolStripMenuItem($"他 {hiddenCount} 件は設定から選択...");
+                moreItem.Click += (_, _) => OpenSettings();
+                designsItem.DropDownItems.Add(moreItem);
             }
         }
         menu.Items.Add(designsItem);
