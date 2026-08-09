@@ -166,7 +166,14 @@ public sealed class TrayAppContext : ApplicationContext
 
         try
         {
-            Process.Start(new ProcessStartInfo(downloadForm.DownloadedFilePath) { UseShellExecute = true });
+            // /VERYSILENT skips the installer wizard entirely - from the user's perspective this
+            // is an in-place self-update, not "installing a different version". installer.iss's
+            // [Run] postinstall entry (no skipifsilent) relaunches the app once files are swapped.
+            Process.Start(new ProcessStartInfo(downloadForm.DownloadedFilePath)
+            {
+                Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
+                UseShellExecute = true,
+            });
         }
         catch (Exception ex)
         {
@@ -175,6 +182,8 @@ public sealed class TrayAppContext : ApplicationContext
             return;
         }
 
+        _notifyIcon.ShowBalloonTip(3000, "アップデート", "更新を適用しています。まもなく再起動します...", ToolTipIcon.Info);
+        await Task.Delay(1500); // give the balloon tip a moment to actually appear before we hide the icon
         ExitApp();
     }
 }
