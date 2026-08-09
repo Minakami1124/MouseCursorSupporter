@@ -164,6 +164,10 @@ public sealed class TrayAppContext : ApplicationContext
             return; // user cancelled the download
         }
 
+        // Updating implies the user wants this app to keep running long-term, so make sure it
+        // comes back after every reboot too - not just right after this update.
+        StartupRegistration.SetEnabled(true);
+
         try
         {
             // /VERYSILENT skips the installer wizard entirely - from the user's perspective this
