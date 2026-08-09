@@ -24,7 +24,7 @@ public sealed class SettingsForm : Form
     private readonly CheckBox _switchOnStartup = new() { Text = "Windows起動/ログオン時にも切り替える", AutoSize = true };
     private readonly RadioButton _selectSequential = new() { Text = "順番にローテーション", AutoSize = true };
     private readonly RadioButton _selectRandom = new() { Text = "ランダム", AutoSize = true };
-    private readonly ComboBox _activeListCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
+    private readonly ComboBox _activeListCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220, DisplayMember = "Name" };
     private readonly DataGridView _timeSlotGrid = new() { Dock = DockStyle.Fill, AllowUserToAddRows = false };
 
     // General tab
