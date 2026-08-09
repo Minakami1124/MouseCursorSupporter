@@ -11,7 +11,10 @@
     <Product>マウスカーソル自動切替</Product>
     <Company>ryokamur</Company>
     <Version>0.6.0</Version>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- InvariantGlobalization was removed: under it, string.Normalize(NormalizationForm.FormC)
+         silently fails to recompose decomposed (NFD) Japanese kana (e.g. combining voiced sound
+         marks), which broke role auto-detection for cursor packs whose zip entry names use NFD
+         (common for zips authored on macOS). Full ICU data is required for that to work. -->
     <!-- NU1510: the Windows Desktop shared framework already carries this, but keeping the
          reference explicit documents why Shift-JIS zip entry names decode correctly. -->
     <NoWarn>NU1510</NoWarn>
